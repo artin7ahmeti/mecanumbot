@@ -4,9 +4,14 @@ import type { RobotClient, Twist } from "./robotClient"
 import type { RobotState } from "../types/robot"
 
 type Config = {
-  url: string // ws://<robot-ip>:9090
-  namespace?: string // default "/mecanumbot" (can also be "" for root topics)
-  cmdVelTopic?: string // override command topic (default "/cmd_vel")
+  url: string
+  namespace?: string
+  cmdVelTopic?: string
+
+  // Optional overrides if you ever want them configurable
+  startRecordingService?: string
+  stopRecordingService?: string
+  listRecordingsService?: string
 }
 
 type BatteryStateMsg = {
@@ -25,32 +30,58 @@ type OdometryMsg = {
   }
 }
 
+// Match geometry_msgs/Twist shape more safely
 type TwistMsg = {
   linear: { x: number; y: number }
-  angular: { x: number; y: number }
+  angular: { x: number; y: number}
 }
 
+// std_srvs/Trigger minimal shapes
+type TriggerReq = Record<string, never>
+type TriggerRes = { success: boolean; message: string }
+type TriggerWireRes = { success?: unknown; message?: unknown }
+
 const AGE_TICK_MS = 200
+const START_ACTIVE_HINT = /recording already active/i
+
+/** Optional but helpful typed error for UI */
+export class AlreadyRecordingError extends Error {
+  constructor(message = "Recording already active") {
+    super(message)
+    this.name = "AlreadyRecordingError"
+  }
+}
 
 export function createRosbridgeClient(cfg: Config): RobotClient {
 
   const nsRaw = (cfg.namespace ?? "/mecanumbot").trim()
   const ns = nsRaw.replace(/\/$/, "")
 
+  /** Namespaced topics for state */
   const topicName = (base: string) => {
-    // Use namespace for state topics
     const cleanBase = base.replace(/^\//, "")
     if (!ns || ns === "/") return `/${cleanBase}`
     const cleanNs = ns.startsWith("/") ? ns : `/${ns}`
     return `${cleanNs}/${cleanBase}`
   }
 
+  /** Forces absolute names */
   const normalizeAbs = (name: string) => {
     const n = name.trim()
     return n.startsWith("/") ? n : `/${n}`
   }
 
   const cmdVelName = normalizeAbs(cfg.cmdVelTopic ?? "/cmd_vel")
+
+  const startSrvName = normalizeAbs(
+    cfg.startRecordingService ?? "/observer/start_recording"
+  )
+  const stopSrvName = normalizeAbs(
+    cfg.stopRecordingService ?? "/observer/stop_recording"
+  )
+  const listSrvName = normalizeAbs(
+    cfg.listRecordingsService ?? "/observer/list_recordings"
+  )
 
   let ros: ROSLIB.Ros | null = null
   const listeners = new Set<(s: RobotState) => void>()
@@ -71,6 +102,9 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
     odom: { x: 0, y: 0, yaw: 0 },
     velocity: { linearX: 0, linearY: 0 },
   }
+
+  // Track last "active recording id" for convenience
+  let activeRecordingId: string | null = null
 
   const client: RobotClient = {
     status: "disconnected",
@@ -98,6 +132,7 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
           connected: false,
           lastSeenMs: Number.POSITIVE_INFINITY,
         }
+
         stopAgeTimer()
         cleanupTopics()
         emit()
@@ -110,6 +145,7 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
           connected: false,
           lastSeenMs: Number.POSITIVE_INFINITY,
         }
+
         stopAgeTimer()
         cleanupTopics()
         emit()
@@ -117,9 +153,28 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
     },
 
     disconnect() {
-      ros?.close()
-      ros = null
+      // Safe disconnect even if already closed/closing
+      stopAgeTimer()
+      cleanupTopics()
 
+      if (!ros) {
+        client.status = "disconnected"
+        latest = {
+          ...latest,
+          connected: false,
+          lastSeenMs: Number.POSITIVE_INFINITY,
+        }
+        emit()
+        return
+      }
+
+      try {
+        ros.close()
+      } catch {
+        // ignore
+      }
+
+      ros = null
       client.status = "disconnected"
       latest = {
         ...latest,
@@ -127,8 +182,6 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
         lastSeenMs: Number.POSITIVE_INFINITY,
       }
 
-      stopAgeTimer()
-      cleanupTopics()
       emit()
     },
 
@@ -144,7 +197,7 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
       if (!cmdVelTopic) return
 
       const msg: TwistMsg = {
-        linear: { x: cmd.linearX, y: cmd.linearY },
+        linear: { x: cmd.linearX, y: cmd.linearY},
         angular: { x: 0, y: 0 },
       }
 
@@ -162,15 +215,58 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
 
     async startRecording(name?: string) {
       void name
-      return crypto.randomUUID()
+
+      if (!ros || client.status !== "connected") {
+        throw new Error("ROS not connected")
+      }
+
+      const res = await callTrigger(startSrvName)
+
+      if (res.success) {
+        activeRecordingId = res.message?.trim() || crypto.randomUUID()
+        return activeRecordingId
+      }
+
+      const msg = (res.message || "").trim()
+
+      if (START_ACTIVE_HINT.test(msg)) {
+        throw new AlreadyRecordingError(msg || "Recording already active")
+      }
+
+      throw new Error(msg || "Failed to start recording")
     },
 
     async stopRecording(sessionId: string) {
-      void sessionId
+      void sessionId // single-active enforced on server side
+
+      if (!ros || client.status !== "connected") {
+        throw new Error("ROS not connected")
+      }
+
+      const res = await callTrigger(stopSrvName)
+
+      if (!res.success) {
+        const msg = (res.message || "").trim()
+        throw new Error(msg || "Failed to stop recording")
+      }
+
+      activeRecordingId = null
     },
 
     async listRecordings() {
-      return []
+      if (!ros || client.status !== "connected") {
+        return []
+      }
+
+      const res = await callTrigger(listSrvName)
+      if (!res.success) return []
+
+      try {
+        const parsed = JSON.parse(res.message || "[]")
+        return Array.isArray(parsed) ? parsed : []
+      } catch {
+        return []
+      }
     },
   }
 
@@ -264,17 +360,43 @@ export function createRosbridgeClient(cfg: Config): RobotClient {
     try {
       batteryTopic?.unsubscribe()
     } catch {
-      // ignore unsubscribe errors
+      // ignore
     }
     try {
       odomTopic?.unsubscribe()
     } catch {
-      // ignore unsubscribe errors
+      // ignore
     }
 
     batteryTopic = null
     odomTopic = null
     cmdVelTopic = null
+  }
+
+  function callTrigger(serviceName: string) {
+    return new Promise<TriggerRes>((resolve, reject) => {
+      if (!ros) return reject(new Error("ROS not ready"))
+
+      const service = new ROSLIB.Service({
+        ros,
+        name: serviceName,
+        serviceType: "std_srvs/srv/Trigger",
+      })
+
+      const request: TriggerReq = {}
+
+      service.callService(
+        request,
+        (response: unknown) => {
+          const res = response as TriggerWireRes
+          resolve({
+            success: Boolean(res?.success),
+            message: String(res?.message ?? ""),
+          })
+        },
+        (err: string) => reject(new Error(err))
+      )
+    })
   }
 
   return client
