@@ -12,7 +12,6 @@ export type OdomState = {
 export type VelocityState = {
   linearX: number
   linearY: number
-  angularZ: number
 }
 
 export type RobotState = {

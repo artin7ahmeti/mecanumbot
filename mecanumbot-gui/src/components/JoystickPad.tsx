@@ -3,7 +3,6 @@ import { useEffect, useMemo, useRef, useState } from "react"
 type JoystickValue = {
   linearX: number
   linearY: number
-  angularZ: number
 }
 
 type Mode = "xy" | "x" | "y"
@@ -227,7 +226,6 @@ export default function JoystickPad({
         >
           <div>linearX: {value.linearX.toFixed(2)}</div>
           <div>linearY: {value.linearY.toFixed(2)}</div>
-          <div>angularZ: {value.angularZ.toFixed(2)}</div>
         </div>
       )}
     </div>

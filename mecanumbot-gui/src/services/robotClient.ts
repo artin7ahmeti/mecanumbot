@@ -3,7 +3,6 @@ import type { RobotState } from "../types/robot"
 export type Twist = {
   linearX: number
   linearY: number
-  angularZ: number
 }
 
 export type ClientStatus =

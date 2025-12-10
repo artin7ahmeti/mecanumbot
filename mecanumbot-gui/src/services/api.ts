@@ -2,7 +2,6 @@
 export async function sendCmdVel(payload: {
   linearX: number
   linearY: number
-  angularZ: number
 }) {
   return fetch("/api/cmd_vel", {
     method: "POST",

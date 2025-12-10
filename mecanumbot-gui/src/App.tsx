@@ -22,7 +22,7 @@ const NAV = [
 ] as const
 
 function App() {
-  const mode = localStorage.getItem("mb_mode") ?? "mock" // "mock" | "ros"
+  const mode = localStorage.getItem("mb_mode") ?? "ros" // "mock" | "ros"
   return (
     <BrowserRouter>
       <div className="app-root">

@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import JoystickPad from "../components/JoystickPad"
 import { useRobot } from "../hook/useRobot"
 
-const SEND_HZ = 10
+const SEND_HZ = 20
+const DEAD = 0.01
 
 export default function Control() {
   const { publish } = useRobot()
@@ -29,20 +30,35 @@ export default function Control() {
     }
   }, [fb.linearX, lr.linearY])
 
-  // ✅ Keep latest command in a ref (no interval reset spam)
+  // Keep latest command in a ref (avoid interval resets)
   const lastRef = useRef(last)
 
   useEffect(() => {
     lastRef.current = last
   }, [last])
 
-  // ✅ Stable publish loop
+  // Stable publish loop
   useEffect(() => {
     const id = window.setInterval(() => {
-      publish(lastRef.current)
+      const cmd = lastRef.current
+
+      const nearZero =
+        Math.abs(cmd.linearX) < DEAD &&
+        Math.abs(cmd.linearY) < DEAD &&
+        Math.abs(cmd.angularZ) < DEAD
+
+      publish(
+        nearZero
+          ? { linearX: 0, linearY: 0, angularZ: 0 }
+          : cmd
+      )
     }, 1000 / SEND_HZ)
 
-    return () => window.clearInterval(id)
+    return () => {
+      window.clearInterval(id)
+      // Safety: stop robot if leaving page/route
+      publish({ linearX: 0, linearY: 0})
+    }
   }, [publish])
 
   return (
@@ -87,7 +103,7 @@ export default function Control() {
         onClick={() => {
           setFb({ linearX: 0 })
           setLr({ linearY: 0 })
-          publish({ linearX: 0, linearY: 0, angularZ: 0 })
+          publish({ linearX: 0, linearY: 0 })
         }}
         style={{
           justifySelf: "start",
